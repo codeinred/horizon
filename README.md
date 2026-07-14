@@ -51,9 +51,11 @@ Renders in under a millisecond. Requires a terminal with 24-bit color
 
 ## Context sources
 
-Context usage is read from the statusline JSON's context fields when the
-running Claude Code version provides them, otherwise from the last usage
-entry in the session transcript, against a 200k window.
+Context usage is read from the statusline JSON's `context_window` object
+(Claude Code ≥ 2.1: `current_usage` over `context_window_size`, so 1M-context
+sessions are measured correctly, with `used_percentage` as a backstop).
+On older versions it falls back to the last usage entry in the session
+transcript against a 200k window.
 
 ## Knobs (mostly for previews)
 
@@ -62,3 +64,9 @@ entry in the session transcript, against a 200k window.
 | `HORIZON_HOUR=19.2` | override the local time |
 | `HORIZON_CTX=85` | override context % |
 | `HORIZON_SEED=proj:branch` | override the gallery's ridge seed |
+| `HORIZON_WIDTH=120` | override the terminal width |
+| `HORIZON_DUMP=1` | dump the input JSON to `$TMPDIR/horizon-input.json` (or set a path) |
+
+The scene stretches to fill the terminal — width is read from the
+controlling tty (`/dev/tty`), since Claude Code pipes stdout. Wide
+terminal, panoramic landscape.

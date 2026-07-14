@@ -19,7 +19,9 @@ use std::f32::consts::TAU;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-const WIDTH: usize = 18;
+// the scene stretches to fill whatever the terminal gives us
+const MIN_SCENE: usize = 18;
+const MAX_SCENE: usize = 80;
 const RESET: &str = "\x1b[0m";
 const BLOCKS: [char; 7] = [' ', '▁', '▂', '▃', '▄', '▅', '▆'];
 const MOON: [char; 8] = ['○', '◔', '◐', '◕', '●', '◕', '◐', '◔'];
@@ -124,23 +126,23 @@ impl Rng {
     }
 }
 
-fn ridge(seed: u64) -> [u8; WIDTH] {
+fn ridge(seed: u64, width: usize) -> Vec<u8> {
     // two overlaid sine waves + jitter: smooth silhouettes, unique per seed
     let f1 = 0.25 + (seed & 0xff) as f32 / 255.0 * 0.20;
     let f2 = 0.65 + ((seed >> 8) & 0xff) as f32 / 255.0 * 0.45;
     let p1 = ((seed >> 16) & 0xff) as f32 / 255.0 * TAU;
     let p2 = ((seed >> 24) & 0xff) as f32 / 255.0 * TAU;
     let mut rng = Rng((seed >> 32) | 1);
-    let mut heights = [0u8; WIDTH];
-    for (x, h) in heights.iter_mut().enumerate() {
-        let fx = x as f32;
-        let y = 2.8
-            + 2.4 * (fx * f1 + p1).sin()
-            + 1.4 * (fx * f2 + p2).sin()
-            + (rng.roll() - 0.5) * 0.8;
-        *h = y.round().clamp(0.0, 6.0) as u8;
-    }
-    heights
+    (0..width)
+        .map(|x| {
+            let fx = x as f32;
+            let y = 2.8
+                + 2.4 * (fx * f1 + p1).sin()
+                + 1.4 * (fx * f2 + p2).sin()
+                + (rng.roll() - 0.5) * 0.8;
+            y.round().clamp(0.0, 6.0) as u8
+        })
+        .collect()
 }
 
 // ─── session info ───────────────────────────────────────────────────────
@@ -243,19 +245,23 @@ fn context_fraction(data: &Value) -> Option<f32> {
     {
         return Some(pct / 100.0);
     }
-    // official context fields, if the running Claude Code version provides them
-    for key in ["context_window", "context"] {
-        if let Some(cw) = data.get(key) {
-            let used = ["used_tokens", "tokens_used", "total_tokens_used", "used"]
-                .iter()
-                .find_map(|k| cw.get(*k).and_then(Value::as_u64));
-            let max = ["max_tokens", "context_limit"]
-                .iter()
-                .find_map(|k| cw.get(*k).and_then(Value::as_u64))
-                .unwrap_or(200_000);
-            if let Some(u) = used {
-                return Some(u as f32 / max.max(1) as f32);
+    // official context fields (Claude Code ≥ 2.1 provides these)
+    if let Some(cw) = data.get("context_window") {
+        let size = cw
+            .get("context_window_size")
+            .and_then(Value::as_u64)
+            .filter(|&s| s > 0);
+        if let (Some(size), Some(u)) = (size, cw.get("current_usage").filter(|u| u.is_object()))
+        {
+            let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+            let used =
+                n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+            if used > 0 {
+                return Some(used as f32 / size as f32);
             }
+        }
+        if let Some(p) = cw.get("used_percentage").and_then(Value::as_u64) {
+            return Some(p as f32 / 100.0);
         }
     }
     // fallback: last usage entry in the transcript
@@ -292,9 +298,9 @@ fn transcript_tokens(path: &str) -> Option<u64> {
 
 // ─── the painting ───────────────────────────────────────────────────────
 
-fn scene(hour: f32, info: &Info) -> String {
+fn scene(hour: f32, info: &Info, width: usize) -> String {
     let sky = sky_at(hour);
-    let heights = ridge(info.seed);
+    let heights = ridge(info.seed, width);
     let is_day = (6.0..19.5).contains(&hour.rem_euclid(24.0));
 
     // the sun/moon travels with context usage; without context data it
@@ -303,7 +309,7 @@ fn scene(hour: f32, info: &Info) -> String {
         .ctx
         .unwrap_or(hour.rem_euclid(24.0) / 24.0)
         .clamp(0.0, 1.0);
-    let body_x = (frac * (WIDTH - 1) as f32).round() as usize;
+    let body_x = (frac * (width - 1) as f32).round() as usize;
 
     let day_t = ((hour - 6.0) / 13.5).clamp(0.0, 1.0);
     let altitude = (day_t * std::f32::consts::PI).sin();
@@ -326,7 +332,7 @@ fn scene(hour: f32, info: &Info) -> String {
 
     let mut out = String::new();
     for (x, &h) in heights.iter().enumerate() {
-        let dx = (x as f32 - body_x as f32) / WIDTH as f32;
+        let dx = (x as f32 - body_x as f32) / width as f32;
         let bloom = (-(dx * 3.2).powi(2)).exp() * glow_strength;
         let cell_sky = base.mix(glow_color, bloom);
         let star_roll = stars.roll();
@@ -348,7 +354,42 @@ fn scene(hour: f32, info: &Info) -> String {
     out
 }
 
-fn render(hour: f32, info: &Info) -> String {
+fn visible_len(s: &str) -> usize {
+    let mut n = 0;
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if in_escape {
+            in_escape = ch != 'm';
+        } else if ch == '\x1b' {
+            in_escape = true;
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn terminal_cols() -> Option<usize> {
+    if let Ok(v) = std::env::var("HORIZON_WIDTH")
+        && let Ok(w) = v.parse::<usize>()
+    {
+        return Some(w);
+    }
+    // stdout is a pipe when Claude Code runs us; ask the controlling tty
+    let tty = std::fs::File::open("/dev/tty").ok()?;
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(&tty),
+            libc::TIOCGWINSZ,
+            &mut ws,
+        )
+    };
+    (ret == 0 && ws.ws_col > 0).then_some(ws.ws_col as usize)
+}
+
+/// `reserve`: columns already spoken for outside this line (labels, padding).
+fn render(hour: f32, info: &Info, reserve: usize) -> String {
     let sky = sky_at(hour);
     let dim = Rgb(108.0, 112.0, 140.0);
     let text = Rgb(205.0, 210.0, 228.0);
@@ -408,7 +449,14 @@ fn render(hour: f32, info: &Info) -> String {
         ));
     }
 
-    format!("{}  {}", scene(hour, info), parts.join(&sep))
+    let info_text = parts.join(&sep);
+    let width = match terminal_cols() {
+        Some(cols) => cols
+            .saturating_sub(visible_len(&info_text) + 2 + reserve)
+            .clamp(MIN_SCENE, MAX_SCENE),
+        None => MIN_SCENE,
+    };
+    format!("{}  {}", scene(hour, info, width), info_text)
 }
 
 // ─── entry ──────────────────────────────────────────────────────────────
@@ -457,7 +505,7 @@ fn gallery() {
             dim.fg(),
             label,
             RESET,
-            render(*hour, &info)
+            render(*hour, &info, 16)
         );
     }
     println!();
@@ -470,7 +518,19 @@ fn main() {
     }
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok();
+    if let Ok(dump) = std::env::var("HORIZON_DUMP") {
+        let path = if dump == "1" {
+            format!(
+                "{}/horizon-input.json",
+                std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
+            )
+        } else {
+            dump
+        };
+        let _ = std::fs::write(path, &input);
+    }
     let data: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
     let info = Info::from_json(&data);
-    println!("{}", render(local_hour(), &info));
+    // Claude Code draws the statusline with a small margin of its own
+    println!("{}", render(local_hour(), &info, 4));
 }
