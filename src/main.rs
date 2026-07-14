@@ -154,6 +154,7 @@ struct Info {
     ctx: Option<f32>,
     cost: Option<f64>,
     dur_ms: Option<u64>,
+    api_ms: Option<u64>,
     added: u64,
     removed: u64,
     seed: u64,
@@ -203,6 +204,9 @@ impl Info {
                 .and_then(Value::as_f64),
             dur_ms: cost_obj
                 .and_then(|c| c.get("total_duration_ms"))
+                .and_then(Value::as_u64),
+            api_ms: cost_obj
+                .and_then(|c| c.get("total_api_duration_ms"))
                 .and_then(Value::as_u64),
             added: get_u64("total_lines_added"),
             removed: get_u64("total_lines_removed"),
@@ -529,67 +533,99 @@ fn render(hour: f32, info: &Info, reserve: usize) -> String {
     let accent = sky.horizon.mix(text, 0.55);
     let sep = format!(" {}·{} ", dim.fg(), RESET);
 
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(format!("{}\x1b[1m{}{}", text.fg(), info.dir, RESET));
+    // (drop rank, colored segment) — lower ranks vanish first when cramped;
+    // the model and the scene itself never drop
+    let mut segs: Vec<(u8, String)> = Vec::new();
+    segs.push((1, format!("{}\x1b[1m{}{}", text.fg(), info.dir, RESET)));
     if let Some(b) = &info.branch {
-        parts.push(format!("{}⎇ {}{}", accent.fg(), b, RESET));
+        segs.push((5, format!("{}⎇ {}{}", accent.fg(), b, RESET)));
     }
-    parts.push(format!(
-        "{}✦ {}{}",
-        Rgb(186.0, 164.0, 240.0).fg(),
-        info.model,
-        RESET
+    segs.push((
+        u8::MAX,
+        format!("{}✦ {}{}", Rgb(186.0, 164.0, 240.0).fg(), info.model, RESET),
     ));
     if let Some(frac) = info.ctx {
         let pct = (frac * 100.0).round() as u32;
-        let color = match pct {
-            0..=49 => Rgb(158.0, 206.0, 106.0),
-            50..=74 => Rgb(224.0, 175.0, 104.0),
-            75..=89 => Rgb(255.0, 158.0, 100.0),
-            _ => Rgb(247.0, 118.0, 142.0),
-        };
+        // stay in the hour's palette; the sunset red is the one warning
+        let color = if pct >= 90 { Rgb(255.0, 96.0, 86.0) } else { accent };
         let fill = MOON[(frac * 4.0).round().clamp(0.0, 4.0) as usize];
-        parts.push(format!("{}{} {}%{}", color.fg(), fill, pct, RESET));
+        segs.push((4, format!("{}{} {}%{}", color.fg(), fill, pct, RESET)));
     }
     if let Some(c) = info.cost
         && c >= 0.005
     {
-        parts.push(format!(
-            "{}${:.2}{}",
-            Rgb(146.0, 196.0, 166.0).fg(),
-            c,
-            RESET
+        segs.push((
+            3,
+            format!("{}${:.2}{}", Rgb(146.0, 196.0, 166.0).fg(), c, RESET),
         ));
     }
     if let Some(ms) = info.dur_ms {
-        let mins = ms / 60_000;
-        let t = if mins >= 60 {
-            format!("{}h{:02}m", mins / 60, mins % 60)
-        } else {
-            format!("{}m", mins)
+        let t = match info.api_ms {
+            Some(api) => format!("{} (api {})", fmt_mins(ms), fmt_mins(api)),
+            None => fmt_mins(ms),
         };
-        parts.push(format!("{}{}{}", dim.fg(), t, RESET));
+        segs.push((6, format!("{}{}{}", dim.fg(), t, RESET)));
     }
     if info.added > 0 || info.removed > 0 {
-        parts.push(format!(
-            "{}+{}{} {}−{}{}",
-            Rgb(120.0, 180.0, 120.0).fg(),
-            info.added,
-            RESET,
-            Rgb(200.0, 120.0, 130.0).fg(),
-            info.removed,
-            RESET
+        segs.push((
+            2,
+            format!(
+                "{}+{}{} {}−{}{}",
+                Rgb(120.0, 180.0, 120.0).fg(),
+                info.added,
+                RESET,
+                Rgb(200.0, 120.0, 130.0).fg(),
+                info.removed,
+                RESET
+            ),
         ));
     }
 
-    let info_text = parts.join(&sep);
-    let width = match terminal_cols() {
+    // shed segments until everything fits alongside the minimum scene
+    let cols = terminal_cols();
+    if let Some(cols) = cols {
+        let budget = cols.saturating_sub(reserve + 2 + MIN_SCENE);
+        let line_len = |segs: &[(u8, String)]| {
+            segs.iter().map(|(_, s)| visible_len(s)).sum::<usize>()
+                + 3 * segs.len().saturating_sub(1)
+        };
+        while line_len(&segs) > budget {
+            let dropped = segs
+                .iter()
+                .enumerate()
+                .filter(|(_, (rank, _))| *rank < u8::MAX)
+                .min_by_key(|(_, (rank, _))| *rank)
+                .map(|(i, _)| i);
+            match dropped {
+                Some(i) => segs.remove(i),
+                None => break,
+            };
+        }
+    }
+
+    let info_text = segs
+        .iter()
+        .map(|(_, s)| s.as_str())
+        .collect::<Vec<_>>()
+        .join(&sep);
+    // the drop loop above keeps this ≥ MIN_SCENE whenever segments could be
+    // shed; below that the landscape itself gives way rather than overflow
+    let width = match cols {
         Some(cols) => cols
             .saturating_sub(visible_len(&info_text) + 2 + reserve)
-            .clamp(MIN_SCENE, MAX_SCENE),
+            .clamp(1, MAX_SCENE),
         None => MIN_SCENE,
     };
     format!("{}  {}", scene(hour, info, width), info_text)
+}
+
+fn fmt_mins(ms: u64) -> String {
+    let mins = ms / 60_000;
+    if mins >= 60 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        format!("{}m", mins)
+    }
 }
 
 // ─── entry ──────────────────────────────────────────────────────────────
@@ -629,6 +665,7 @@ fn gallery() {
             ctx: Some(0.05 + 0.90 * i as f32 / (frames.len() - 1) as f32),
             cost: Some(0.87),
             dur_ms: Some(47 * 60_000),
+            api_ms: Some(29 * 60_000),
             added: 120,
             removed: 33,
             seed: fnv1a(&seed_str),
