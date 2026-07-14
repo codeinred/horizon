@@ -21,7 +21,7 @@ use std::path::Path;
 
 // the scene stretches to fill whatever the terminal gives us
 const MIN_SCENE: usize = 18;
-const MAX_SCENE: usize = 80;
+const MAX_SCENE: usize = 240;
 const RESET: &str = "\x1b[0m";
 const BLOCKS: [char; 7] = [' ', '▁', '▂', '▃', '▄', '▅', '▆'];
 const MOON: [char; 8] = ['○', '◔', '◐', '◕', '●', '◕', '◐', '◔'];
@@ -375,17 +375,86 @@ fn terminal_cols() -> Option<usize> {
     {
         return Some(w);
     }
-    // stdout is a pipe when Claude Code runs us; ask the controlling tty
-    let tty = std::fs::File::open("/dev/tty").ok()?;
+    // stdout is a pipe when Claude Code runs us: try any inherited fd that
+    // still points at the terminal, then the controlling tty, then the
+    // terminal our ancestors are attached to
+    for fd in [2, 1, 0] {
+        if let Some(c) = cols_of_fd(fd) {
+            return Some(c);
+        }
+    }
+    if let Some(c) = std::fs::File::open("/dev/tty")
+        .ok()
+        .and_then(|f| cols_of_fd(std::os::fd::AsRawFd::as_raw_fd(&f)))
+    {
+        return Some(c);
+    }
+    ancestor_tty_cols()
+}
+
+fn cols_of_fd(fd: i32) -> Option<usize> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    let ret = unsafe {
-        libc::ioctl(
-            std::os::fd::AsRawFd::as_raw_fd(&tty),
-            libc::TIOCGWINSZ,
-            &mut ws,
-        )
-    };
+    let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
     (ret == 0 && ws.ws_col > 0).then_some(ws.ws_col as usize)
+}
+
+fn cols_of_tty_path(path: &Path) -> Option<usize> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // ioctl only — O_NOCTTY so we never adopt it, and we never read from it
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    cols_of_fd(std::os::fd::AsRawFd::as_raw_fd(&f))
+}
+
+/// Claude Code runs us detached (no controlling terminal, stdio all pipes),
+/// but our ancestors — the Claude Code process, the shell above it — still
+/// hold fds onto the real pty. Walk up /proc and borrow the first one.
+fn ancestor_tty_cols() -> Option<usize> {
+    let mut pid = unsafe { libc::getppid() } as i64;
+    for _ in 0..12 {
+        if pid <= 1 {
+            break;
+        }
+        for fd in 0..3 {
+            if let Ok(target) = std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+                && target.to_string_lossy().starts_with("/dev/pts/")
+                && let Some(c) = cols_of_tty_path(&target)
+            {
+                return Some(c);
+            }
+        }
+        // ppid is the second field after the comm's closing paren in stat
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        pid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+    }
+    None
+}
+
+fn width_debug_report() -> String {
+    let mut s = String::new();
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    for fd in [0, 1, 2] {
+        let tty = unsafe { libc::isatty(fd) } == 1;
+        let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+        s.push_str(&format!(
+            "fd{fd}: isatty={tty} ioctl_ret={ret} cols={}\n",
+            ws.ws_col
+        ));
+    }
+    match std::fs::File::open("/dev/tty") {
+        Ok(tty) => {
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&tty);
+            let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+            s.push_str(&format!("/dev/tty: ioctl_ret={ret} cols={}\n", ws.ws_col));
+        }
+        Err(e) => s.push_str(&format!("/dev/tty: open failed: {e}\n")),
+    }
+    s.push_str(&format!("ancestor_tty_cols() -> {:?}\n", ancestor_tty_cols()));
+    s.push_str(&format!("terminal_cols() -> {:?}\n", terminal_cols()));
+    s
 }
 
 /// `reserve`: columns already spoken for outside this line (labels, padding).
@@ -519,15 +588,14 @@ fn main() {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok();
     if let Ok(dump) = std::env::var("HORIZON_DUMP") {
+        let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
         let path = if dump == "1" {
-            format!(
-                "{}/horizon-input.json",
-                std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
-            )
+            format!("{tmp}/horizon-input.json")
         } else {
             dump
         };
         let _ = std::fs::write(path, &input);
+        let _ = std::fs::write(format!("{tmp}/horizon-debug.txt"), width_debug_report());
     }
     let data: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
     let info = Info::from_json(&data);
