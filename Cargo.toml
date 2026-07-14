@@ -2,5 +2,12 @@
 name = "statusline"
 version = "0.1.0"
 edition = "2024"
+description = "horizon — a living landscape for the Claude Code statusline"
 
 [dependencies]
+serde_json = "1"
+chrono = "0.4"
+
+[profile.release]
+strip = true
+lto = true
