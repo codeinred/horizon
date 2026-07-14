@@ -375,6 +375,13 @@ fn terminal_cols() -> Option<usize> {
     {
         return Some(w);
     }
+    // COLUMNS is authoritative when the spawning shell exports it
+    if let Ok(v) = std::env::var("COLUMNS")
+        && let Ok(w) = v.parse::<usize>()
+        && w > 0
+    {
+        return Some(w);
+    }
     // stdout is a pipe when Claude Code runs us: try any inherited fd that
     // still points at the terminal, then the controlling tty, then the
     // terminal our ancestors are attached to
@@ -412,6 +419,7 @@ fn cols_of_tty_path(path: &Path) -> Option<usize> {
 /// Claude Code runs us detached (no controlling terminal, stdio all pipes),
 /// but our ancestors — the Claude Code process, the shell above it — still
 /// hold fds onto the real pty. Walk up /proc and borrow the first one.
+#[cfg(target_os = "linux")]
 fn ancestor_tty_cols() -> Option<usize> {
     let mut pid = unsafe { libc::getppid() } as i64;
     for _ in 0..12 {
@@ -433,8 +441,64 @@ fn ancestor_tty_cols() -> Option<usize> {
     None
 }
 
+/// macOS has no /proc; proc_pidinfo(PROC_PIDTBSDINFO) reports each ancestor's
+/// parent and — conveniently — e_tdev, its controlling terminal's device
+/// number. Find the matching /dev/ttys* node by rdev and ioctl that.
+#[cfg(target_os = "macos")]
+fn ancestor_tty_cols() -> Option<usize> {
+    let mut pid = unsafe { libc::getppid() };
+    for _ in 0..12 {
+        if pid <= 1 {
+            break;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if ret != size {
+            return None;
+        }
+        if info.e_tdev != 0
+            && info.e_tdev != u32::MAX
+            && let Some(c) = tty_cols_by_rdev(info.e_tdev as u64)
+        {
+            return Some(c);
+        }
+        pid = info.pbi_ppid as libc::c_int;
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn tty_cols_by_rdev(rdev: u64) -> Option<usize> {
+    use std::os::unix::fs::MetadataExt;
+    for entry in std::fs::read_dir("/dev").ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("ttys")
+            && let Ok(meta) = entry.metadata()
+            && meta.rdev() == rdev
+            && let Some(c) = cols_of_tty_path(&entry.path())
+        {
+            return Some(c);
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn ancestor_tty_cols() -> Option<usize> {
+    None
+}
+
 fn width_debug_report() -> String {
     let mut s = String::new();
+    s.push_str(&format!("COLUMNS={:?}\n", std::env::var("COLUMNS").ok()));
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     for fd in [0, 1, 2] {
         let tty = unsafe { libc::isatty(fd) } == 1;

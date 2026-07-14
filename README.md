@@ -67,6 +67,9 @@ transcript against a 200k window.
 | `HORIZON_WIDTH=120` | override the terminal width |
 | `HORIZON_DUMP=1` | dump the input JSON to `$TMPDIR/horizon-input.json` (or set a path) |
 
-The scene stretches to fill the terminal — width is read from the
-controlling tty (`/dev/tty`), since Claude Code pipes stdout. Wide
-terminal, panoramic landscape.
+The scene stretches to fill the terminal — wide terminal, panoramic
+landscape. Width comes from `$COLUMNS` when the spawning process exports
+it (Claude Code does); otherwise, since the statusline runs detached
+(stdio piped, no controlling terminal), the real pty is found through
+the process tree — `/proc` on Linux, `proc_pidinfo` on macOS — and
+queried directly with `TIOCGWINSZ`.
