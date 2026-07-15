@@ -70,6 +70,32 @@ const SKY: [SkyKey; 11] = [
     (24.0, [30.0, 34.0, 84.0], [9.0, 11.0, 31.0], [5.0, 6.0, 16.0]),
 ];
 
+// --always-night: the day still keeps time, but entirely in shades of night —
+// a symmetric arc of purples, deepest indigo-violet at real midnight, rising
+// through mauve to a dusky sunset at noon, then sinking back. Every zenith
+// stays dark, the stars never set, and the moon is always the body in the sky.
+// keyframes sit on the gallery's sample hours, with values chosen so the
+// color distance between consecutive gallery frames stays roughly even
+const NIGHT_SKY: [SkyKey; 11] = [
+    (0.0, [36.0, 32.0, 92.0], [8.0, 8.0, 30.0], [4.0, 4.0, 15.0]), // indigo midnight
+    (4.5, [84.0, 54.0, 132.0], [14.0, 12.0, 42.0], [7.0, 6.0, 20.0]), // dark violet
+    (6.0, [140.0, 82.0, 152.0], [22.0, 17.0, 56.0], [11.0, 8.0, 26.0]), // mauve
+    (7.5, [190.0, 98.0, 140.0], [30.0, 22.0, 66.0], [14.0, 10.0, 30.0]), // dusky rose
+    (12.5, [240.0, 110.0, 116.0], [56.0, 32.0, 98.0], [24.0, 13.0, 40.0]), // sunset at noon
+    (15.0, [178.0, 96.0, 138.0], [38.0, 26.0, 76.0], [17.0, 11.0, 33.0]), // dusky rose
+    (17.5, [126.0, 74.0, 150.0], [28.0, 22.0, 66.0], [12.0, 9.0, 28.0]), // dusk violet
+    (19.0, [96.0, 60.0, 136.0], [20.0, 16.0, 54.0], [9.0, 7.0, 24.0]), // violet
+    (20.5, [66.0, 47.0, 118.0], [14.0, 13.0, 44.0], [7.0, 6.0, 20.0]), // deep violet
+    (22.5, [46.0, 37.0, 102.0], [10.0, 10.0, 36.0], [5.0, 5.0, 17.0]), // near midnight
+    (24.0, [36.0, 32.0, 92.0], [8.0, 8.0, 30.0], [4.0, 4.0, 15.0]), // wrap
+];
+
+static NIGHT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn night_mode() -> bool {
+    NIGHT_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 struct Sky {
     horizon: Rgb,
     zenith: Rgb,
@@ -77,10 +103,11 @@ struct Sky {
 }
 
 fn sky_at(hour: f32) -> Sky {
+    let table: &[SkyKey] = if night_mode() { &NIGHT_SKY } else { &SKY };
     let h = hour.rem_euclid(24.0);
-    let i = SKY.iter().rposition(|k| k.0 <= h).unwrap_or(0);
-    let (h0, a1, a2, a3) = SKY[i];
-    let (h1, b1, b2, b3) = SKY[(i + 1).min(SKY.len() - 1)];
+    let i = table.iter().rposition(|k| k.0 <= h).unwrap_or(0);
+    let (h0, a1, a2, a3) = table[i];
+    let (h1, b1, b2, b3) = table[(i + 1).min(table.len() - 1)];
     let t = if h1 > h0 { (h - h0) / (h1 - h0) } else { 0.0 };
     let rgb = |a: [f32; 3]| Rgb(a[0], a[1], a[2]);
     Sky {
@@ -305,7 +332,7 @@ fn transcript_tokens(path: &str) -> Option<u64> {
 fn scene(hour: f32, info: &Info, width: usize) -> String {
     let sky = sky_at(hour);
     let heights = ridge(info.seed, width);
-    let is_day = (6.0..19.5).contains(&hour.rem_euclid(24.0));
+    let is_day = !night_mode() && (6.0..19.5).contains(&hour.rem_euclid(24.0));
 
     // the sun/moon travels with context usage; without context data it
     // drifts with the hour instead, so the scene still moves
@@ -327,10 +354,17 @@ fn scene(hour: f32, info: &Info, width: usize) -> String {
     } else {
         sky.horizon.mix(Rgb(170.0, 190.0, 240.0), 0.45)
     };
-    let glow_strength = if is_day { 0.85 } else { 0.4 };
+    // in always-night the moon is the only light source, so it blooms harder
+    let glow_strength = if is_day {
+        0.85
+    } else if night_mode() {
+        0.55
+    } else {
+        0.4
+    };
 
     let base = sky.zenith.mix(sky.horizon, 0.30);
-    let starry = sky.zenith.lum() < 48.0;
+    let starry = night_mode() || sky.zenith.lum() < 48.0;
     let mut stars = Rng(info.seed ^ (Local::now().ordinal() as u64).wrapping_mul(0x9e37_79b9));
     let moon = MOON[moon_phase_index()];
 
@@ -549,7 +583,7 @@ fn render(hour: f32, info: &Info, reserve: usize) -> String {
         // stay in the hour's palette; the sunset red is the one warning
         let color = if pct >= 90 { Rgb(255.0, 96.0, 86.0) } else { accent };
         let fill = MOON[(frac * 4.0).round().clamp(0.0, 4.0) as usize];
-        segs.push((4, format!("{}{} {}%{}", color.fg(), fill, pct, RESET)));
+        segs.push((4, format!("{}{} {:>2}%{}", color.fg(), fill, pct, RESET)));
     }
     if let Some(c) = info.cost
         && c >= 0.005
@@ -670,18 +704,22 @@ fn gallery() {
             removed: 33,
             seed: fnv1a(&seed_str),
         };
+        // 1 col of padding left of the label, 1 col spare at the right edge
         println!(
-            "  {}{:>12}{}  {}",
+            " {}{:>11}{}  {}",
             dim.fg(),
             label,
             RESET,
-            render(*hour, &info, 16)
+            render(*hour, &info, 15)
         );
     }
     println!();
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--always-night") {
+        NIGHT_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::args().any(|a| a == "--gallery") {
         gallery();
         return;
