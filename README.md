@@ -1,12 +1,15 @@
 # horizon-statusline
 
-horizon-statusline is a tiny landscape painting capturing a view of the horizon
-over the mountains, designed as a piece of art created by Fable.
+`horizon-statusline` is a tiny landscape painting capturing a view of the
+horizon, a piece of art created by Fable.
 
 ![Image of the statusline shown at different states throughout the day](https://raw.githubusercontent.com/codeinred/horizon/HEAD/images/horizon-gallery.png)
 
-For discerning users with a preference for a nighttime aesthetic, the statusline
-also provides an `--always-night` option, which provides a more vibrant, dusky, and night-centric palette.
+If you prefer the nighttime aesthetic (which I find especially pretty), passing
+`--always-night` provides a more vibrant, dusky, and night-centric palette for
+the statusline, while still keeping time: the horizon remains brightest around
+noon, and darkest at midnight, before brightening again in the hours leading up
+to the dawn.
 
 ![The statusline, at night](https://raw.githubusercontent.com/codeinred/horizon/HEAD/images/horizon-gallery-always-night.png)
 
@@ -21,13 +24,11 @@ git branch.
 
 At night, the moon is filled in based on the phase of the moon, computed
 astronomically using the current date & time, and stars come out when the sky is
-dark enough. The statusline is intended to be a piece of art created _by_ Fable,
-as much as it is a visualization of the current state of the session, and if you
-expand or shrink your terminal, the statusline will grow with it to fill the
-available space.
+dark enough.
 
-On narrower terminals, components are removed from the statusline gracefully in
-the following order:
+If you expand or shrink your terminal, the statusline will grow or shrink with
+it. On narrower terminals, components are removed from the statusline gracefully
+in the following order:
 
 1. Directory name (eg, `horizon`)
 2. Lines added/removed (`+120 −33`)
@@ -36,15 +37,20 @@ the following order:
 5. Branch name (eg, `main`)
 6. Session/API time (eg, `47m (api 29m)`)
 
-The model name is never dropped, nor is the landscape, although this will shrink
-to a minimum width of 18 columns as components are shed from the statusline, in
-order to prevent overflow, only shrinking below 18 columns when no more
-components can be shed.
+The model name is never dropped, nor is the landscape. The landscape shrinks to
+make room as components are shed, but it never drops below 18 columns unless
+there is nothing left to shed.
 
 The gallery can be rendered as:
 
-```bash
+```sh
 horizon-statusline --gallery
+```
+
+Or, for the always-night variant:
+
+```sh
+horizon-statusline --gallery --always-night
 ```
 
 ## Install
@@ -97,13 +103,12 @@ landscape, while a narrower one trims the statusline to focus only on the most
 relevant information.
 
 Width comes from `$COLUMNS` when the spawning process exports it (Claude Code
-does); otherwise, since the statusline runs detached (stdio piped, no
-controlling terminal), the real pty is found through the process tree: `/proc`
-on Linux, `proc_pidinfo` on macOS — and queried directly with `TIOCGWINSZ`.
+does); otherwise, since the statusline runs detached, the real pty is found
+through the process tree and queried directly with `TIOCGWINSZ`.
 
 ## Message from Fable
 
-The following description was written by Fable, about this project:
+The following description was written by Fable about this project:
 
 > Horizon is a statusline that treats your terminal's bottom row as a tiny
 > landscape painting. Instead of just printing facts, it renders a procedural
