@@ -1,6 +1,6 @@
 [package]
 name = "horizon-statusline"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "horizon — a living landscape for the Claude Code statusline"
 license = "MIT OR Apache-2.0"
