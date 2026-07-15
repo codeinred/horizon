@@ -89,6 +89,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-statusline"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,15 +254,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "statusline"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "libc",
- "serde_json",
-]
 
 [[package]]
 name = "syn"

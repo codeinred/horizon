@@ -1,8 +1,14 @@
 [package]
-name = "statusline"
+name = "horizon-statusline"
 version = "0.1.0"
 edition = "2024"
 description = "horizon — a living landscape for the Claude Code statusline"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/codeinred/horizon"
+readme = "README.md"
+exclude = ["images/"]
+keywords = ["statusline", "claude-code", "tui", "terminal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 serde_json = "1"
